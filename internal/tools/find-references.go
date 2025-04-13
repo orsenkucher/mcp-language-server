@@ -10,6 +10,7 @@ import (
 
 	"github.com/isaacphi/mcp-language-server/internal/lsp"
 	"github.com/isaacphi/mcp-language-server/internal/protocol"
+	"github.com/isaacphi/mcp-language-server/internal/utilities"
 )
 
 // ScopeIdentifier uniquely identifies a scope (function, method, etc.) in a file
@@ -23,6 +24,13 @@ type ScopeIdentifier struct {
 type ReferencePosition struct {
 	Line      uint32
 	Character uint32
+}
+
+// ScopeInfo stores information about a code scope including its name and kind
+type ScopeInfo struct {
+	Name    string              // Name of the scope
+	Kind    protocol.SymbolKind // Kind of the symbol (if available, 0 otherwise)
+	HasKind bool                // Whether we have kind information
 }
 
 func FindReferences(ctx context.Context, client *lsp.Client, symbolName string, showLineNumbers bool) (string, error) {
@@ -86,14 +94,14 @@ func FindReferences(ctx context.Context, client *lsp.Client, symbolName string, 
 		// Process each file's references
 		for uri, fileRefs := range refsByFile {
 			filePath := strings.TrimPrefix(string(uri), "file://")
-			fileInfo := fmt.Sprintf("\nFile: %s (%d references)\n", filePath, len(fileRefs))
+			fileInfo := fmt.Sprintf("File: %s (%d references)", filePath, len(fileRefs))
 			allReferences = append(allReferences, fileInfo)
 
 			// Group references by scope within each file
 			// We'll use ScopeIdentifier to uniquely identify each scope
 			scopeRefs := make(map[ScopeIdentifier][]ReferencePosition)
 			scopeTexts := make(map[ScopeIdentifier]string)
-			scopeNames := make(map[ScopeIdentifier]string)
+			scopeInfos := make(map[ScopeIdentifier]ScopeInfo)
 
 			// Try to get document symbols for the file once
 			var docSymbols []protocol.DocumentSymbolResult
@@ -163,7 +171,7 @@ func FindReferences(ctx context.Context, client *lsp.Client, symbolName string, 
 				scopeTexts[scopeID] = fullScope
 
 				// Try to find a name for this scope (only do this once per scope)
-				if _, exists := scopeNames[scopeID]; !exists {
+				if _, exists := scopeInfos[scopeID]; !exists {
 					// Check if this might be a reference in an attribute or import
 					isAttribute := false
 					scopeLines := strings.Split(fullScope, "\n")
@@ -214,7 +222,7 @@ func FindReferences(ctx context.Context, client *lsp.Client, symbolName string, 
 											}
 
 											// This is the best match, get its name with kind
-											kindStr := getKindString(ds.Kind)
+											kindStr := utilities.ExtractSymbolKind(ds)
 											if kindStr != "" {
 												return fmt.Sprintf("%s %s", kindStr, ds.Name)
 											}
@@ -310,7 +318,33 @@ func FindReferences(ctx context.Context, client *lsp.Client, symbolName string, 
 					}
 
 					// Don't truncate the scope name - show full signature
-					scopeNames[scopeID] = scopeName
+					scopeInfo := ScopeInfo{
+						Name:    scopeName,
+						Kind:    0, // Default to unknown kind
+						HasKind: false,
+					}
+
+					// If we found this name via document symbols, try to get the kind too
+					if len(docSymbols) > 0 {
+						// Find a symbol that contains this scope range
+						for _, sym := range docSymbols {
+							symRange := sym.GetRange()
+
+							// Check if this symbol contains our scope
+							if symRange.Start.Line <= scopeID.StartLine &&
+								symRange.End.Line >= scopeID.EndLine {
+
+								// Try to get the kind via reflection
+								if ds, ok := sym.(*protocol.DocumentSymbol); ok {
+									scopeInfo.Kind = ds.Kind
+									scopeInfo.HasKind = true
+									break
+								}
+							}
+						}
+					}
+
+					scopeInfos[scopeID] = scopeInfo
 				}
 			}
 
@@ -323,12 +357,33 @@ func FindReferences(ctx context.Context, client *lsp.Client, symbolName string, 
 							positions[i].Character < positions[j].Character)
 				})
 
-				// Scope header
-				scopeHeader := fmt.Sprintf("  Scope: %s (lines %d-%d, %d references)\n",
-					scopeNames[scopeID],
-					scopeID.StartLine+1,
-					scopeID.EndLine+1,
-					len(positions))
+				// Get scope information for this scope
+				scopeInfo := scopeInfos[scopeID]
+
+				// Add debug information about the scope kind being processed
+				debugInfo := fmt.Sprintf("DEBUG: Scope=%s, HasKind=%v, Kind=%d",
+					scopeInfo.Name, scopeInfo.HasKind, scopeInfo.Kind)
+				allReferences = append(allReferences, debugInfo)
+
+				// Format the scope header with kind information if available
+				var scopeHeader string
+				if scopeInfo.HasKind {
+					// Use the language server's kind information for the symbol
+					kindStr := utilities.GetSymbolKindString(scopeInfo.Kind)
+					scopeHeader = fmt.Sprintf("  %s %s (lines %d-%d, %d references)",
+						kindStr,
+						scopeInfo.Name,
+						scopeID.StartLine+1,
+						scopeID.EndLine+1,
+						len(positions))
+				} else {
+					// Fallback to simple scope name
+					scopeHeader = fmt.Sprintf("  Scope: %s (lines %d-%d, %d references)",
+						scopeInfo.Name,
+						scopeID.StartLine+1,
+						scopeID.EndLine+1,
+						len(positions))
+				}
 				allReferences = append(allReferences, scopeHeader)
 
 				// List reference positions compactly
@@ -465,7 +520,6 @@ func FindReferences(ctx context.Context, client *lsp.Client, symbolName string, 
 				}
 
 				allReferences = append(allReferences, "    "+strings.ReplaceAll(formattedScope, "\n", "\n    "))
-				allReferences = append(allReferences, "") // Empty line between scopes
 			}
 		}
 	}
@@ -477,30 +531,7 @@ func FindReferences(ctx context.Context, client *lsp.Client, symbolName string, 
 	return strings.Join(allReferences, "\n"), nil
 }
 
-// Helper function to convert SymbolKind to a string description
-func getKindString(kind protocol.SymbolKind) string {
-	switch kind {
-	case 5: // Class
-		return "class"
-	case 6: // Method
-		return "method"
-	case 11: // Interface
-		return "interface"
-	case 12: // Function
-		return "function"
-	case 23: // Struct
-		return "struct"
-	case 10: // Enum
-		return "enum"
-	case 13: // Variable
-		return "var"
-	case 14: // Constant
-		return "const"
-	default:
-		return ""
-	}
-}
-
+// Helper functions for GetContextSnippet - moved to utilities package
 // GetContextSnippet returns a compact context around the reference location
 // numLines specifies how many lines before and after to include
 func GetContextSnippet(ctx context.Context, client *lsp.Client, loc protocol.Location, numLines int) (string, error) {
