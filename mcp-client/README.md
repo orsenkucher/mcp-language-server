@@ -25,3 +25,21 @@ python main.py document_symbols filePath=internal/tools/find-references.go
 
 # Call a tool with no arguments (if any exist)
 # python main.py some_tool_with_no_args
+
+# Example for a large Rust project
+python main.py --workspace /Users/orsen/Develop/ato \
+                  --lsp rust-analyzer \
+                  --delay 10 \
+                  find_references symbolName=WalletManager showLineNumbers=true
+
+# Example for the Go project (might need less delay)
+python main.py --workspace /Users/orsen/Develop/mcp-language-server \
+                  --lsp gopls \
+                  --delay 5 \
+                  find_references symbolName=ScopeInfo showLineNumbers=true
+
+# Example hover call with delay
+python main.py --workspace /path/to/your/large-rust-project \
+                  --lsp rust-analyzer \
+                  --delay 15 \
+                  hover filePath=src/some_module/file.rs line=123 column=15

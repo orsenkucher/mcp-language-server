@@ -2,12 +2,21 @@ import argparse
 import asyncio
 import json
 import sys
+import time
 from mcp import ClientSession, StdioServerParameters, types
 from mcp.client.stdio import stdio_client
 
 # --- Server Configuration (Modify as needed) ---
 SERVER_COMMAND = "/Users/orsen/Develop/mcp-language-server/mcp-language-server"
-SERVER_ARGS = ["--workspace", "/Users/orsen/Develop/mcp-language-server", "--lsp", "gopls"]
+SERVER_ARGS = [
+    "--workspace",
+    # Use a placeholder or make this configurable too if needed
+    # "/Users/orsen/Develop/ato",  # Rust project
+    "/Users/orsen/Develop/mcp-language-server",  # Default back to original
+    "--lsp",
+    # "rust-analyzer",
+    "gopls",
+]
 SERVER_ENV = {}
 SERVER_NAME = "language-server"  # Used for logging/identification if needed
 
@@ -52,14 +61,37 @@ def parse_tool_arguments(arg_list):
     return parsed_args, None
 
 
-async def run_mcp_tool_cli(tool_name, tool_arguments):
-    """Connects to the MCP server and executes the specified tool."""
+async def run_mcp_tool_cli(tool_name, tool_arguments, initial_delay_s, workspace_path, lsp_name):
+    """Connects to the MCP server and executes the specified tool after an initial delay."""
+
+    # --- Update Server Args dynamically ---
+    # Find workspace arg index
+    try:
+        ws_idx = SERVER_ARGS.index("--workspace")
+        SERVER_ARGS[ws_idx + 1] = workspace_path
+    except (ValueError, IndexError):
+        print(
+            "Warning: --workspace argument not found/updated in SERVER_ARGS template.",
+            file=sys.stderr,
+        )
+        # Optionally add them if not found
+        # SERVER_ARGS.extend(["--workspace", workspace_path])
+
+    # Find lsp arg index
+    try:
+        lsp_idx = SERVER_ARGS.index("--lsp")
+        SERVER_ARGS[lsp_idx + 1] = lsp_name
+    except (ValueError, IndexError):
+        print("Warning: --lsp argument not found/updated in SERVER_ARGS template.", file=sys.stderr)
+        # Optionally add them if not found
+        # SERVER_ARGS.extend(["--lsp", lsp_name])
 
     print(f"--- Configuration ---")
     print(f"Server Command: {SERVER_COMMAND}")
     print(f"Server Args: {SERVER_ARGS}")
     print(f"Target Tool: {tool_name}")
     print(f"Tool Arguments: {json.dumps(tool_arguments, indent=2)}")
+    print(f"Initial Delay: {initial_delay_s} seconds")
     print("-" * 20 + "\n")
 
     server_params = StdioServerParameters(
@@ -77,13 +109,24 @@ async def run_mcp_tool_cli(tool_name, tool_arguments):
                 print("Initializing MCP session...")
                 init_result = await session.initialize()
                 print(f"Session initialized successfully!")
-                # Optional: print capabilities if needed
-                # print(f"Server capabilities: {init_result.capabilities}")
+
+                # --- ADDED DELAY ---
+                if initial_delay_s > 0:
+                    print(f"Waiting {initial_delay_s} seconds for server initialization...")
+                    # Optional: Add a simple progress indicator
+                    for i in range(initial_delay_s):
+                        print(f"  Waiting... {i+1}/{initial_delay_s}s", end='\r')
+                        await asyncio.sleep(1)
+                    print("\nWait finished.")  # Newline after progress indication
+                else:
+                    print("No initial delay specified.")
+                # --- END ADDED DELAY ---
 
                 print(f"\nCalling tool '{tool_name}'...")
 
                 result = await session.call_tool(tool_name, arguments=tool_arguments)
 
+                # --- Pretty Print Result (same as before) ---
                 print("\n--- Tool Result ---")
                 # The result type depends on what the tool returns.
                 # It could be a primitive, dict, list, etc.
@@ -153,8 +196,29 @@ async def run_mcp_tool_cli(tool_name, tool_arguments):
 def main():
     parser = argparse.ArgumentParser(
         description="MCP Client CLI to interact with a language server.",
-        epilog="Example: python %(prog)s find_references symbolName=MyFunction showLineNumbers=true",
+        epilog="Example: python %(prog)s --workspace /path/to/proj --lsp rust-analyzer --delay 20 find_references symbolName=MyStruct",
     )
+
+    # --- Added Arguments for Configuration ---
+    parser.add_argument(
+        "--workspace",
+        required=True,
+        help="Path to the project workspace directory for the language server.",
+    )
+    parser.add_argument(
+        "--lsp",
+        required=True,
+        choices=['gopls', 'rust-analyzer'],  # Add more LSP names if needed
+        help="Name of the Language Server Protocol implementation to use.",
+    )
+    parser.add_argument(
+        "--delay",
+        type=int,
+        default=0,
+        metavar='SECONDS',
+        help="Initial delay in seconds to wait for server initialization before sending the tool request. Default: 0",
+    )
+    # --- End Added Arguments ---
 
     parser.add_argument(
         "tool_name",
@@ -176,9 +240,17 @@ def main():
     if error_msg:
         parser.error(error_msg)  # argparse handles printing usage and exiting
 
-    # Run the async main function
+    # Run the async main function, passing the new config options
     try:
-        asyncio.run(run_mcp_tool_cli(args.tool_name, arguments_dict))
+        asyncio.run(
+            run_mcp_tool_cli(
+                args.tool_name,
+                arguments_dict,
+                args.delay,
+                args.workspace,  # Pass workspace path
+                args.lsp,  # Pass LSP name
+            )
+        )
     except KeyboardInterrupt:
         print("\nClient interrupted by user.")
         sys.exit(0)
