@@ -216,18 +216,132 @@ func GetFullDefinition(ctx context.Context, client *lsp.Client, startLocation pr
 }
 
 // addLineNumbers adds line numbers to each line of text with proper padding, starting from startLine
-func addLineNumbers(text string, startLine int) string {
+// If highlightLines is provided, those line numbers (0-indexed relative to the start of the text) will be marked
+func addLineNumbers(text string, startLine int, highlightLines ...int) string {
 	lines := strings.Split(text, "\n")
 	// Calculate padding width based on the number of digits in the last line number
-	lastLineNum := startLine + len(lines)
+	lastLineNum := startLine + len(lines) - 1
 	padding := len(strconv.Itoa(lastLineNum))
+
+	// Convert highlight lines to a map for efficient lookup
+	highlights := make(map[int]bool)
+	for _, line := range highlightLines {
+		highlights[line] = true
+	}
 
 	var result strings.Builder
 	for i, line := range lines {
 		// Format line number with padding and separator
-		lineNum := strconv.Itoa(startLine + i)
-		linePadding := strings.Repeat(" ", padding-len(lineNum))
-		result.WriteString(fmt.Sprintf("%s%s|%s\n", linePadding, lineNum, line))
+		lineNum := startLine + i
+		lineNumStr := strconv.Itoa(lineNum)
+		linePadding := strings.Repeat(" ", padding-len(lineNumStr))
+
+		// Determine if this line should be highlighted
+		marker := "|"
+		if highlights[i] {
+			marker = ">" // Use '>' to indicate highlighted lines
+		}
+
+		result.WriteString(fmt.Sprintf("%s%s%s %s\n", linePadding, lineNumStr, marker, line))
 	}
 	return result.String()
+}
+
+// GetDefinitionWithContext returns the text around a given position with configurable context
+// contextLines specifies how many lines before and after to include
+func GetDefinitionWithContext(ctx context.Context, client *lsp.Client, loc protocol.Location, contextLines int) (string, error) {
+	// Convert URI to filesystem path
+	filePath, err := url.PathUnescape(strings.TrimPrefix(string(loc.URI), "file://"))
+	if err != nil {
+		return "", fmt.Errorf("failed to unescape URI: %w", err)
+	}
+
+	// Read the file
+	content, err := os.ReadFile(filePath)
+	if err != nil {
+		return "", fmt.Errorf("failed to read file: %w", err)
+	}
+
+	fileLines := strings.Split(string(content), "\n")
+
+	// Calculate the range to show, ensuring we don't go out of bounds
+	startLine := int(loc.Range.Start.Line) - contextLines
+	if startLine < 0 {
+		startLine = 0
+	}
+
+	endLine := int(loc.Range.Start.Line) + contextLines
+	if endLine >= len(fileLines) {
+		endLine = len(fileLines) - 1
+	}
+
+	// Extract the lines and join them
+	selectedLines := fileLines[startLine : endLine+1]
+
+	// Return the selected lines
+	return strings.Join(selectedLines, "\n"), nil
+}
+
+// TruncateDefinition shortens a definition if it's too long
+// It keeps the beginning, the context around targetLine, and the end
+func TruncateDefinition(definition string, targetLine int, contextSize int, maxLines int) string {
+	lines := strings.Split(definition, "\n")
+
+	// If the definition is already short enough, just return it
+	if len(lines) <= maxLines {
+		return definition
+	}
+
+	// Calculate the range to keep around the target line
+	contextStart := targetLine - contextSize
+	if contextStart < 0 {
+		contextStart = 0
+	}
+
+	contextEnd := targetLine + contextSize
+	if contextEnd >= len(lines) {
+		contextEnd = len(lines) - 1
+	}
+
+	// Decide how many lines to keep from beginning and end
+	remainingLines := maxLines - (contextEnd - contextStart + 1) - 2 // -2 for ellipsis markers
+	startLines := remainingLines / 2
+	endLines := remainingLines - startLines
+
+	// Adjust if context overlaps with start/end segments
+	if contextStart < startLines {
+		startLines = contextStart
+		endLines = remainingLines - startLines
+	}
+
+	if contextEnd > (len(lines) - 1 - endLines) {
+		endLines = len(lines) - 1 - contextEnd
+		startLines = remainingLines - endLines
+	}
+
+	// Create the resulting truncated definition
+	var result []string
+
+	// Add beginning lines if not overlapping with context
+	if contextStart > startLines {
+		result = append(result, lines[:startLines]...)
+		result = append(result, "...")
+	} else {
+		// Just use all lines up to context start
+		result = append(result, lines[:contextStart]...)
+	}
+
+	// Add the context around the target line
+	result = append(result, lines[contextStart:contextEnd+1]...)
+
+	// Add end lines if not overlapping with context
+	if contextEnd < len(lines)-1-endLines {
+		result = append(result, "...")
+		result = append(result, lines[len(lines)-endLines:]...)
+	} else {
+		// Just use all lines from context end
+		result = append(result, lines[contextEnd+1:]...)
+	}
+
+	return strings.Join(result, "\n")
 }

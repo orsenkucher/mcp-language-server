@@ -33,9 +33,9 @@ func ReadDefinition(ctx context.Context, client *lsp.Client, symbolName string, 
 		switch v := symbol.(type) {
 		case *protocol.SymbolInformation:
 			// SymbolInformation results have richer data.
-			kind = fmt.Sprintf("Kind: %s\n", protocol.TableKindMap[v.Kind])
+			kind = protocol.TableKindMap[v.Kind]
 			if v.ContainerName != "" {
-				container = fmt.Sprintf("Container Name: %s\n", v.ContainerName)
+				container = v.ContainerName
 			}
 			if v.Kind == protocol.Method && strings.HasSuffix(symbol.GetName(), symbolName) {
 				break
@@ -49,42 +49,44 @@ func ReadDefinition(ctx context.Context, client *lsp.Client, symbolName string, 
 			}
 		}
 
-		log.Printf("Symbol: %s\n", symbol.GetName())
 		loc := symbol.GetLocation()
+		filePath := strings.TrimPrefix(string(loc.URI), "file://")
 
-		banner := strings.Repeat("=", 80) + "\n"
 		definition, loc, err := GetFullDefinition(ctx, client, loc)
-		locationInfo := fmt.Sprintf(
-			"Symbol: %s\n"+
-				"File: %s\n"+
-				kind+
-				container+
-				"Start Position: Line %d, Column %d\n"+
-				"End Position: Line %d, Column %d\n"+
-				"%s\n",
-			symbol.GetName(),
-			strings.TrimPrefix(string(loc.URI), "file://"),
-			loc.Range.Start.Line+1,
-			loc.Range.Start.Character+1,
-			loc.Range.End.Line+1,
-			loc.Range.End.Character+1,
-			strings.Repeat("=", 80))
-
 		if err != nil {
 			log.Printf("Error getting definition: %v\n", err)
 			continue
 		}
 
+		// Create a cleaner header with key information
+		header := fmt.Sprintf("Symbol: %s\nFile: %s\n",
+			symbol.GetName(),
+			filePath)
+
+		// Add kind and container if available
+		if kind != "" {
+			header += fmt.Sprintf("Kind: %s\n", kind)
+		}
+		if container != "" {
+			header += fmt.Sprintf("Container Name: %s\n", container)
+		}
+
+		// Add location information but simplified
+		header += fmt.Sprintf("Location: Lines %d-%d\n",
+			loc.Range.Start.Line+1,
+			loc.Range.End.Line+1)
+
+		// Format the code with line numbers if requested
 		if showLineNumbers {
 			definition = addLineNumbers(definition, int(loc.Range.Start.Line)+1)
 		}
 
-		definitions = append(definitions, banner+locationInfo+definition+"\n")
+		definitions = append(definitions, header+definition)
 	}
 
 	if len(definitions) == 0 {
 		return fmt.Sprintf("%s not found", symbolName), nil
 	}
 
-	return strings.Join(definitions, "\n"), nil
+	return strings.Join(definitions, "\n\n"), nil
 }
