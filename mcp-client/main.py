@@ -1,59 +1,87 @@
+import argparse
 import asyncio
 import json
-from mcp import ClientSession, StdioServerParameters
+import sys
+from mcp import ClientSession, StdioServerParameters, types
 from mcp.client.stdio import stdio_client
-import mcp.types as types  # Good practice for potential type hints or checking
+
+# --- Server Configuration (Modify as needed) ---
+SERVER_COMMAND = "/Users/orsen/Develop/mcp-language-server/mcp-language-server"
+SERVER_ARGS = ["--workspace", "/Users/orsen/Develop/mcp-language-server", "--lsp", "gopls"]
+SERVER_ENV = {}
+SERVER_NAME = "language-server"  # Used for logging/identification if needed
 
 
-async def run_language_server_client():
-    # --- Configuration from your JSON ---
-    server_name = "language-server"  # Used for potential logging/identification
-    server_command = "/Users/orsen/Develop/mcp-language-server/mcp-language-server"
-    server_args = ["--workspace", "/Users/orsen/Develop/mcp-language-server", "--lsp", "gopls"]
-    server_env = {}  # Empty as per your config
+def parse_value(value_str):
+    """Attempts to parse a string value into bool, int, float, or keeps as string."""
+    val_lower = value_str.lower()
+    if val_lower == 'true':
+        return True
+    if val_lower == 'false':
+        return False
+    try:
+        return int(value_str)
+    except ValueError:
+        pass
+    try:
+        return float(value_str)
+    except ValueError:
+        pass
+    # If it's quoted, remove quotes (basic handling)
+    if len(value_str) >= 2 and value_str.startswith('"') and value_str.endswith('"'):
+        return value_str[1:-1]
+    if len(value_str) >= 2 and value_str.startswith("'") and value_str.endswith("'"):
+        return value_str[1:-1]
+    return value_str
 
-    # --- Request Details ---
-    # The MCP SDK's call_tool likely takes the base tool name.
-    # The SDK should handle constructing the full JSON-RPC method
-    # like "mcp__language-server__find_references" internally based on the context.
-    # If this doesn't work, you might need to investigate if a lower-level
-    # request mechanism is needed or if the tool name needs the prefix.
-    tool_name = "find_references"
-    tool_arguments = {"symbolName": "ScopeInfo", "showLineNumbers": True}
-    # The full JSON-RPC method name as per your example request:
-    # full_method_name = f"mcp__{server_name}__{tool_name}"
 
-    # --- Client Logic ---
-    print(f"Configuring client for server: {server_name}")
-    print(f"Command: {server_command}")
-    print(f"Args: {server_args}")
+def parse_tool_arguments(arg_list):
+    """Parses a list of 'key=value' strings into a dictionary."""
+    parsed_args = {}
+    if not arg_list:
+        return parsed_args, None  # No arguments provided is valid
 
-    # Create server parameters for stdio connection
+    for arg_pair in arg_list:
+        if '=' not in arg_pair:
+            return None, f"Invalid argument format: '{arg_pair}'. Expected 'key=value'."
+        key, value_str = arg_pair.split('=', 1)
+        if not key:
+            return None, f"Argument key cannot be empty in '{arg_pair}'."
+        parsed_args[key] = parse_value(value_str)
+
+    return parsed_args, None
+
+
+async def run_mcp_tool_cli(tool_name, tool_arguments):
+    """Connects to the MCP server and executes the specified tool."""
+
+    print(f"--- Configuration ---")
+    print(f"Server Command: {SERVER_COMMAND}")
+    print(f"Server Args: {SERVER_ARGS}")
+    print(f"Target Tool: {tool_name}")
+    print(f"Tool Arguments: {json.dumps(tool_arguments, indent=2)}")
+    print("-" * 20 + "\n")
+
     server_params = StdioServerParameters(
-        command=server_command,
-        args=server_args,
-        env=server_env,
+        command=SERVER_COMMAND,
+        args=SERVER_ARGS,
+        env=SERVER_ENV,
     )
 
     try:
-        # Launch the server process and get communication streams
         print("Attempting to start server via stdio...")
         async with stdio_client(server_params) as (read_stream, write_stream):
             print("Server process likely started. Establishing MCP session...")
 
-            # Create and manage the client session
             async with ClientSession(read_stream, write_stream) as session:
                 print("Initializing MCP session...")
-                # Initialize the connection (sends initialize request, receives response)
                 init_result = await session.initialize()
                 print(f"Session initialized successfully!")
-                # You can optionally inspect init_result.capabilities here
+                # Optional: print capabilities if needed
                 # print(f"Server capabilities: {init_result.capabilities}")
 
-                print(f"\nCalling tool '{tool_name}' on server '{server_name}'...")
-                print(f"Arguments: {json.dumps(tool_arguments, indent=2)}")
+                print(f"\nCalling tool '{tool_name}'...")
 
-                # Call the specific tool using the base name
                 result = await session.call_tool(tool_name, arguments=tool_arguments)
 
                 print("\n--- Tool Result ---")
@@ -66,10 +94,9 @@ async def run_language_server_client():
                 print("-------------------\n")
 
                 # --- New Pretty Printing Logic ---
-                print("\n--- Tool Result ---")
+                print("\n--- Tool Result (Formatted) ---")
                 if hasattr(result, 'isError') and result.isError:
                     print("Tool call resulted in an error.")
-                    # Try to print error content if available
                     if hasattr(result, 'content') and result.content:
                         error_text = ""
                         for content_item in result.content:
@@ -79,68 +106,83 @@ async def run_language_server_client():
                                 and hasattr(content_item, 'text')
                             ):
                                 error_text += content_item.text
-                            elif isinstance(content_item, str):  # Simple string error?
+                            elif isinstance(content_item, str):
                                 error_text += content_item
                         if error_text:
                             print("Error details:")
                             print(error_text)
-                        else:  # Fallback if content isn't helpful text
+                        else:
                             print(f"Raw error result object: {result}")
                     else:
-                        # No specific content, print the raw result
                         print(f"Raw error result object: {result}")
 
                 elif hasattr(result, 'content') and result.content:
-                    # Process successful result with content
                     full_text_output = ""
                     for content_item in result.content:
-                        # Check if it's a TextContent object and extract its text
-                        # You might need to import types: from mcp import types
-                        # if isinstance(content_item, types.TextContent):
-                        # Or more generically check attributes:
                         if (
                             hasattr(content_item, 'type')
                             and content_item.type == 'text'
                             and hasattr(content_item, 'text')
                         ):
                             full_text_output += content_item.text
-                        # Add elif clauses here if the tool might return other content types
-                        # like ImageContent, etc., and you want to handle them.
                         else:
-                            # Append the representation of unknown content types
                             full_text_output += f"\n[Unsupported Content Type: {type(content_item)}]\n{content_item}\n"
-
-                    # Print the concatenated text content
-                    print(
-                        full_text_output.strip()
-                    )  # Use strip() to remove leading/trailing whitespace
+                    print(full_text_output.strip())
 
                 else:
-                    # Handle cases where the result might be simple (None, bool, number)
-                    # or an unexpected object structure without 'content'.
                     print("Tool returned a result without standard content structure:")
                     if isinstance(result, (dict, list)):
                         print(json.dumps(result, indent=2))
                     else:
-                        print(result)  # Print the raw result object/value
+                        print(result)
 
                 print("-------------------\n")
-
                 print("Client finished.")
 
     except Exception as e:
-        print(f"\n--- An Error Occurred ---")
-        print(f"Error type: {type(e).__name__}")
-        print(f"Error details: {e}")
+        print(f"\n--- An Error Occurred ---", file=sys.stderr)
+        print(f"Error type: {type(e).__name__}", file=sys.stderr)
+        print(f"Error details: {e}", file=sys.stderr)
         import traceback
 
-        traceback.print_exc()
-        print("-------------------------\n")
+        traceback.print_exc(file=sys.stderr)
+        print("-------------------------\n", file=sys.stderr)
+        sys.exit(1)  # Exit with error code
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="MCP Client CLI to interact with a language server.",
+        epilog="Example: python %(prog)s find_references symbolName=MyFunction showLineNumbers=true",
+    )
+
+    parser.add_argument(
+        "tool_name",
+        help="The name of the MCP tool to call (e.g., 'find_references', 'read_definition').",
+    )
+    parser.add_argument(
+        "tool_args",
+        nargs='*',  # 0 or more arguments
+        help="Arguments for the tool, specified as 'key=value' pairs. "
+        "Values 'true'/'false' are parsed as booleans, numbers as int/float if possible, otherwise as strings. "
+        "Use quotes for values with spaces if your shell requires it (e.g., 'filePath=\"my file.go\"').",
+    )
+
+    args = parser.parse_args()
+
+    # Parse the key=value arguments into a dictionary
+    arguments_dict, error_msg = parse_tool_arguments(args.tool_args)
+
+    if error_msg:
+        parser.error(error_msg)  # argparse handles printing usage and exiting
+
+    # Run the async main function
+    try:
+        asyncio.run(run_mcp_tool_cli(args.tool_name, arguments_dict))
+    except KeyboardInterrupt:
+        print("\nClient interrupted by user.")
+        sys.exit(0)
 
 
 if __name__ == "__main__":
-    # Ensure the script is run within an asyncio event loop
-    try:
-        asyncio.run(run_language_server_client())
-    except KeyboardInterrupt:
-        print("\nClient interrupted.")
+    main()

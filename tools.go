@@ -56,7 +56,6 @@ type DocumentSymbolsArgs struct {
 }
 
 func (s *server) registerTools() error {
-
 	err := s.mcpServer.RegisterTool(
 		"apply_text_edit",
 		"Apply multiple text edits to a file.",
