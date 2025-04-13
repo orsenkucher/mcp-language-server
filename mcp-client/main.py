@@ -17,7 +17,9 @@ SERVER_ARGS = [
     # "rust-analyzer",
     "gopls",
 ]
-SERVER_ENV = {}
+SERVER_ENV = {
+    # "MCP_DEBUG_LOG": "true",  # Enable debug logging
+}
 SERVER_NAME = "language-server"  # Used for logging/identification if needed
 
 

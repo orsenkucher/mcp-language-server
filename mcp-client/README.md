@@ -32,6 +32,21 @@ python main.py --workspace /Users/orsen/Develop/ato \
                   --delay 10 \
                   find_references symbolName=WalletManager showLineNumbers=true
 
+python main.py --workspace /Users/orsen/Develop/ato \
+                  --lsp rust-analyzer \
+                  --delay 6 \
+                  read_definition symbolName=run_collect_holders_with_progress showLineNumbers=true
+
+python main.py --workspace /Users/orsen/Develop/ato \
+                  --lsp rust-analyzer \
+                  --delay 6 \
+                  find_references symbolName=run_collect_holders_with_progress showLineNumbers=true
+
+python main.py --workspace /Users/orsen/Develop/ato \
+                  --lsp rust-analyzer \
+                  --delay 6 \
+                  document_symbols filePath=/Users/orsen/Develop/ato/bot/src/wallet_manager.rs showLineNumbers=true
+
 # Example for the Go project (might need less delay)
 python main.py --workspace /Users/orsen/Develop/mcp-language-server \
                   --lsp gopls \
