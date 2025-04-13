@@ -247,39 +247,82 @@ func addLineNumbers(text string, startLine int, highlightLines ...int) string {
 	return result.String()
 }
 
-// GetDefinitionWithContext returns the text around a given position with configurable context
-// contextLines specifies how many lines before and after to include
-func GetDefinitionWithContext(ctx context.Context, client *lsp.Client, loc protocol.Location, contextLines int) (string, error) {
+// GetDefinitionWithContext returns the text around a given position with configurable context,
+// along with the location (Range) corresponding to that returned text.
+// contextLines specifies how many lines before and after the reference line to include.
+// loc is the location of the original reference point.
+func GetDefinitionWithContext(ctx context.Context, client *lsp.Client /* Remove client if not used */, loc protocol.Location, contextLines int) (string, protocol.Location, error) {
 	// Convert URI to filesystem path
 	filePath, err := url.PathUnescape(strings.TrimPrefix(string(loc.URI), "file://"))
 	if err != nil {
-		return "", fmt.Errorf("failed to unescape URI: %w", err)
+		return "", protocol.Location{}, fmt.Errorf("failed to unescape URI: %w", err)
 	}
 
-	// Read the file
+	// Read the file content
 	content, err := os.ReadFile(filePath)
 	if err != nil {
-		return "", fmt.Errorf("failed to read file: %w", err)
+		// Return zero location on error
+		return "", protocol.Location{}, fmt.Errorf("failed to read file '%s': %w", filePath, err)
 	}
 
-	fileLines := strings.Split(string(content), "\n")
+	// It's generally safer to handle different line endings
+	// Replace CRLF with LF for consistent splitting
+	normalizedContent := strings.ReplaceAll(string(content), "\r\n", "\n")
+	fileLines := strings.Split(normalizedContent, "\n")
 
 	// Calculate the range to show, ensuring we don't go out of bounds
-	startLine := int(loc.Range.Start.Line) - contextLines
+	refLine := int(loc.Range.Start.Line) // The line where the reference occurs
+
+	// Check if the reference line itself is valid
+	if refLine < 0 || refLine >= len(fileLines) {
+		return "", protocol.Location{}, fmt.Errorf("reference line %d is out of bounds for file %s (0-%d)", refLine+1, filePath, len(fileLines)-1)
+	}
+
+	startLine := refLine - contextLines
 	if startLine < 0 {
 		startLine = 0
 	}
 
-	endLine := int(loc.Range.Start.Line) + contextLines
+	endLine := refLine + contextLines
 	if endLine >= len(fileLines) {
 		endLine = len(fileLines) - 1
 	}
 
-	// Extract the lines and join them
-	selectedLines := fileLines[startLine : endLine+1]
+	// Ensure startLine is not greater than endLine (can happen if contextLines is large and file is small)
+	if startLine > endLine {
+		startLine = endLine
+	}
 
-	// Return the selected lines
-	return strings.Join(selectedLines, "\n"), nil
+	// Extract the lines
+	selectedLines := fileLines[startLine : endLine+1]
+	contextText := strings.Join(selectedLines, "\n")
+
+	// Create the location corresponding to the extracted text
+	// Start position: beginning of the startLine
+	// End position: end of the endLine (use a large character number or actual length if needed,
+	// but for scope identification, just the lines are often sufficient).
+	// Using length of last line for slightly more accuracy.
+	endChar := uint32(0)
+	if endLine >= 0 && endLine < len(fileLines) { // Check bounds for fileLines[endLine]
+		endChar = uint32(len(fileLines[endLine]))
+	}
+
+	contextLocation := protocol.Location{
+		URI: loc.URI, // Use the original URI
+		Range: protocol.Range{
+			Start: protocol.Position{
+				Line:      uint32(startLine),
+				Character: 0, // Start of the line
+			},
+			End: protocol.Position{
+				Line:      uint32(endLine),
+				Character: endChar, // End of the last included line
+			},
+		},
+	}
+
+	// Return the extracted text, its location, and nil error
+	return contextText, contextLocation, nil
 }
 
 // TruncateDefinition shortens a definition if it's too long
