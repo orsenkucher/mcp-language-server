@@ -95,12 +95,55 @@ func FindReferences(ctx context.Context, client *lsp.Client, symbolName string, 
 			scopeTexts := make(map[ScopeIdentifier]string)
 			scopeNames := make(map[ScopeIdentifier]string)
 
+			// Try to get document symbols for the file once
+			var docSymbols []protocol.DocumentSymbolResult
+			symParams := protocol.DocumentSymbolParams{
+				TextDocument: protocol.TextDocumentIdentifier{
+					URI: uri,
+				},
+			}
+
+			symResult, symErr := client.DocumentSymbol(ctx, symParams)
+			if symErr == nil {
+				docSymbols, _ = symResult.Results()
+			}
+
 			// First pass: get scope for each reference
 			for _, ref := range fileRefs {
-				// Get the full definition/scope containing this reference
+				// Some references might be in imports or attributes which might not be
+				// part of a formal scope recognized by the language server
+
+				// Try standard scope finding first
 				fullScope, scopeLoc, err := GetFullDefinition(ctx, client, ref)
 				if err != nil {
-					continue
+					// If we can't find a scope, it might be in an import or attribute
+					// Get a smaller context around the reference instead
+					contextLines := 10 // Get 10 lines of context
+					smallerScope, err := GetDefinitionWithContext(ctx, client, ref, contextLines)
+					if err != nil {
+						continue
+					}
+
+					// Create a smaller scope range
+					startLine := ref.Range.Start.Line
+					if startLine > uint32(contextLines) {
+						startLine -= uint32(contextLines)
+					} else {
+						startLine = 0
+					}
+
+					endLine := ref.Range.Start.Line + uint32(contextLines)
+
+					// Update the scopeLoc
+					scopeLoc = protocol.Location{
+						URI: ref.URI,
+						Range: protocol.Range{
+							Start: protocol.Position{Line: startLine},
+							End:   protocol.Position{Line: endLine},
+						},
+					}
+
+					fullScope = smallerScope
 				}
 
 				// Create a scope identifier
@@ -121,17 +164,153 @@ func FindReferences(ctx context.Context, client *lsp.Client, symbolName string, 
 
 				// Try to find a name for this scope (only do this once per scope)
 				if _, exists := scopeNames[scopeID]; !exists {
-					// Extract the first line of the scope to use as a name
-					firstLine := strings.Split(fullScope, "\n")[0]
-					firstLine = strings.TrimSpace(firstLine)
+					// Check if this might be a reference in an attribute or import
+					isAttribute := false
+					scopeLines := strings.Split(fullScope, "\n")
+					refLineIdx := int(ref.Range.Start.Line - scopeID.StartLine)
 
-					// Truncate if too long
-					const maxNameLength = 60
-					if len(firstLine) > maxNameLength {
-						firstLine = firstLine[:maxNameLength] + "..."
+					if refLineIdx >= 0 && refLineIdx < len(scopeLines) {
+						refLine := strings.TrimSpace(scopeLines[refLineIdx])
+						if strings.HasPrefix(refLine, "#[") ||
+							strings.HasPrefix(refLine, "use ") ||
+							strings.HasPrefix(refLine, "import ") {
+							isAttribute = true
+						}
 					}
 
-					scopeNames[scopeID] = firstLine
+					var scopeName string
+
+					if isAttribute {
+						// For attributes/imports, use the line containing the reference as the scope name
+						if refLineIdx >= 0 && refLineIdx < len(scopeLines) {
+							scopeName = "Attribute/Import: " + strings.TrimSpace(scopeLines[refLineIdx])
+						} else {
+							scopeName = "Attribute/Import"
+						}
+					} else {
+						// Try regular scope name detection
+
+						// First attempt: Try to use the document symbols to get an accurate scope name
+						if len(docSymbols) > 0 {
+							// Find a symbol that contains our reference position
+							var findSymbolInRange func([]protocol.DocumentSymbolResult, protocol.Range) string
+							findSymbolInRange = func(symbols []protocol.DocumentSymbolResult, targetRange protocol.Range) string {
+								for _, sym := range symbols {
+									symRange := sym.GetRange()
+
+									// Check if this symbol contains our scope
+									if symRange.Start.Line <= targetRange.Start.Line &&
+										symRange.End.Line >= targetRange.End.Line {
+
+										// Check if it has children that might be a better match
+										if ds, ok := sym.(*protocol.DocumentSymbol); ok && len(ds.Children) > 0 {
+											childSymbols := make([]protocol.DocumentSymbolResult, len(ds.Children))
+											for i := range ds.Children {
+												childSymbols[i] = &ds.Children[i]
+											}
+
+											if childName := findSymbolInRange(childSymbols, targetRange); childName != "" {
+												return childName
+											}
+
+											// This is the best match, get its name with kind
+											kindStr := getKindString(ds.Kind)
+											if kindStr != "" {
+												return fmt.Sprintf("%s %s", kindStr, ds.Name)
+											}
+											return ds.Name
+										}
+
+										return sym.GetName()
+									}
+								}
+								return ""
+							}
+
+							// Try to find a symbol containing our scope range
+							if scopeName = findSymbolInRange(docSymbols, scopeLoc.Range); scopeName != "" {
+								// Use the symbol name from LSP
+							} else {
+								// Fallback: Parse the scope text to find a good name
+
+								// Extract the function/method signature - the first line of actual code
+								// Look specifically for definition patterns across languages
+								foundDefinition := false
+								functionPatterns := []string{
+									"func ", "fn ", "def ", "pub fn", "async fn",
+								}
+								typePatterns := []string{
+									"type ", "class ", "struct ", "enum ", "interface ",
+									"pub struct", "pub enum", "pub trait",
+								}
+
+								// First pass: Look for function/method definitions
+								for _, line := range scopeLines {
+									trimmed := strings.TrimSpace(line)
+									if trimmed == "" {
+										continue
+									}
+
+									// Skip comments and attributes
+									if strings.HasPrefix(trimmed, "///") ||
+										strings.HasPrefix(trimmed, "//") ||
+										strings.HasPrefix(trimmed, "/*") ||
+										strings.HasPrefix(trimmed, "*") ||
+										strings.HasPrefix(trimmed, "*/") ||
+										strings.HasPrefix(trimmed, "#[") {
+										continue
+									}
+
+									// Check for function patterns
+									for _, pattern := range functionPatterns {
+										if strings.Contains(trimmed, pattern) {
+											// Found a function signature - take the full line
+											scopeName = trimmed
+											foundDefinition = true
+											break
+										}
+									}
+
+									if foundDefinition {
+										break
+									}
+
+									// Check for type patterns
+									for _, pattern := range typePatterns {
+										if strings.Contains(trimmed, pattern) {
+											// Found a type definition - take the full line
+											scopeName = trimmed
+											foundDefinition = true
+											break
+										}
+									}
+
+									if foundDefinition {
+										break
+									}
+
+									// If no function or type pattern matched but this is a non-comment line
+									// Use it as our scope name
+									scopeName = trimmed
+									break
+								}
+
+								// If we couldn't find anything, use the first non-empty line
+								if scopeName == "" && len(scopeLines) > 0 {
+									for _, line := range scopeLines {
+										trimmed := strings.TrimSpace(line)
+										if trimmed != "" {
+											scopeName = trimmed
+											break
+										}
+									}
+								}
+							}
+						}
+					}
+
+					// Don't truncate the scope name - show full signature
+					scopeNames[scopeID] = scopeName
 				}
 			}
 
@@ -175,26 +354,117 @@ func FindReferences(ctx context.Context, client *lsp.Client, symbolName string, 
 						fmt.Sprintf("    References: %s", strings.Join(positionChunk, ", ")))
 				}
 
-				// Show the scope content, but minimized and with line numbers if requested
+				// Get the scope content
 				scopeText := scopeTexts[scopeID]
+				scopeLines := strings.Split(scopeText, "\n")
 
-				// For very large scopes, show just part of it
-				lines := strings.Split(scopeText, "\n")
-				if len(lines) > 15 {
-					// Show beginning and end with ellipsis
-					beginning := lines[:7]
-					ending := lines[len(lines)-7:]
-					lines = append(beginning, "    ...")
-					lines = append(lines, ending...)
-					scopeText = strings.Join(lines, "\n")
+				// For very large scopes, show only relevant parts
+				if len(scopeLines) > 50 { // Only truncate if scope is larger than 50 lines
+					// Create a map of important lines to always include
+					importantLines := make(map[int]bool)
+
+					// Always include the first 5 lines (for context/signature)
+					for i := 0; i < 5 && i < len(scopeLines); i++ {
+						importantLines[i] = true
+					}
+
+					// Always include the last 3 lines (for closing braces)
+					for i := len(scopeLines) - 3; i < len(scopeLines) && i >= 0; i++ {
+						importantLines[i] = true
+					}
+
+					// Always include reference lines and 2 lines of context above and below
+					for _, hlLine := range highlightLines {
+						for offset := -2; offset <= 2; offset++ {
+							lineIdx := hlLine + offset
+							if lineIdx >= 0 && lineIdx < len(scopeLines) {
+								importantLines[lineIdx] = true
+							}
+						}
+					}
+
+					// Build the truncated output with proper line references
+					var truncatedLines []string
+					inSkipSection := false
+					lastShownIndex := -1
+
+					for i := 0; i < len(scopeLines); i++ {
+						if importantLines[i] {
+							// If we were in a skip section, add a marker with line count
+							if inSkipSection {
+								skippedLines := i - lastShownIndex - 1
+								if skippedLines > 0 {
+									truncatedLines = append(truncatedLines, fmt.Sprintf("    ... %d lines skipped ...", skippedLines))
+								}
+								inSkipSection = false
+							}
+							truncatedLines = append(truncatedLines, scopeLines[i])
+							lastShownIndex = i
+						} else if !inSkipSection && lastShownIndex >= 0 {
+							inSkipSection = true
+						}
+					}
+
+					// If we ended in a skip section, add a final marker
+					if inSkipSection && lastShownIndex < len(scopeLines)-1 {
+						skippedLines := len(scopeLines) - lastShownIndex - 1
+						if skippedLines > 0 {
+							truncatedLines = append(truncatedLines, fmt.Sprintf("    ... %d lines skipped ...", skippedLines))
+						}
+					}
+
+					// Replace the scope lines with our truncated version
+					scopeLines = truncatedLines
 				}
 
+				// Add line numbers if requested
+				var formattedScope string
 				if showLineNumbers {
-					// Use the highlighting version of addLineNumbers for reference lines
-					scopeText = addLineNumbers(scopeText, int(scopeID.StartLine)+1, highlightLines...)
+					var builder strings.Builder
+					lineNum := int(scopeID.StartLine) + 1
+
+					for i, line := range scopeLines {
+						// Check if this is a skipped lines marker
+						if strings.Contains(line, "lines skipped") {
+							// Extract the number of lines skipped
+							var skipped int
+							_, err := fmt.Sscanf(line, "    ... %d lines skipped ...", &skipped)
+							if err != nil {
+								// If we can't parse the number, assume a default
+								skipped = 1
+							}
+							builder.WriteString(line + "\n")
+							lineNum += skipped
+							continue
+						}
+
+						// Determine if this is a reference line
+						isRef := false
+						for _, hl := range highlightLines {
+							if i == hl || (lineNum == int(scopeID.StartLine)+hl+1) {
+								isRef = true
+								break
+							}
+						}
+
+						// Add padding to line number
+						numStr := fmt.Sprintf("%d", lineNum)
+						padding := strings.Repeat(" ", 5-len(numStr))
+
+						// Mark reference lines with '>' and others with '|'
+						if isRef {
+							builder.WriteString(fmt.Sprintf("%s%s> %s\n", padding, numStr, line))
+						} else {
+							builder.WriteString(fmt.Sprintf("%s%s| %s\n", padding, numStr, line))
+						}
+						lineNum++
+					}
+					formattedScope = builder.String()
+				} else {
+					formattedScope = strings.Join(scopeLines, "\n")
 				}
 
-				allReferences = append(allReferences, "    "+strings.ReplaceAll(scopeText, "\n", "\n    "))
+				allReferences = append(allReferences, "    "+strings.ReplaceAll(formattedScope, "\n", "\n    "))
 				allReferences = append(allReferences, "") // Empty line between scopes
 			}
 		}
@@ -205,6 +475,30 @@ func FindReferences(ctx context.Context, client *lsp.Client, symbolName string, 
 	}
 
 	return strings.Join(allReferences, "\n"), nil
+}
+
+// Helper function to convert SymbolKind to a string description
+func getKindString(kind protocol.SymbolKind) string {
+	switch kind {
+	case 5: // Class
+		return "class"
+	case 6: // Method
+		return "method"
+	case 11: // Interface
+		return "interface"
+	case 12: // Function
+		return "function"
+	case 23: // Struct
+		return "struct"
+	case 10: // Enum
+		return "enum"
+	case 13: // Variable
+		return "var"
+	case 14: // Constant
+		return "const"
+	default:
+		return ""
+	}
 }
 
 // GetContextSnippet returns a compact context around the reference location
