@@ -47,6 +47,12 @@ python main.py --workspace /Users/orsen/Develop/ato \
                   --delay 6 \
                   document_symbols filePath=/Users/orsen/Develop/ato/bot/src/wallet_manager.rs showLineNumbers=true
 
+python main.py --workspace /Users/orsen/Develop/ato \
+                  --lsp rust-analyzer \
+                  --delay 6 \
+                  hover filePath=/Users/orsen/Develop/ato/bot/src/wallet_manager.rs line=2983 column=28
+
+
 # Example for the Go project (might need less delay)
 python main.py --workspace /Users/orsen/Develop/mcp-language-server \
                   --lsp gopls \
