@@ -210,7 +210,7 @@ def main():
     parser.add_argument(
         "--lsp",
         required=True,
-        choices=['gopls', 'rust-analyzer'],  # Add more LSP names if needed
+        choices=['gopls', 'rust-analyzer', 'tsserver'],  # Add more LSP names if needed
         help="Name of the Language Server Protocol implementation to use.",
     )
     parser.add_argument(

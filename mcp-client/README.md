@@ -64,3 +64,9 @@ python main.py --workspace /path/to/your/large-rust-project \
                   --lsp rust-analyzer \
                   --delay 15 \
                   hover filePath=src/some_module/file.rs line=123 column=15
+
+# Typescript example
+python main.py --workspace /Users/orsen/Develop/sa-control-panel \
+                  --lsp tsserver \
+                  --delay 6 \
+                  find_references symbolName=startCollectHolders showLineNumbers=true
