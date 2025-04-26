@@ -13,6 +13,7 @@ import (
 	"github.com/fsnotify/fsnotify"
 	"github.com/isaacphi/mcp-language-server/internal/lsp"
 	"github.com/isaacphi/mcp-language-server/internal/protocol"
+	gitignore "github.com/sabhiram/go-gitignore"
 )
 
 var debug = true // Force debug logging on
@@ -21,6 +22,7 @@ var debug = true // Force debug logging on
 type WorkspaceWatcher struct {
 	client        *lsp.Client
 	workspacePath string
+	gitIgnore     *gitignore.GitIgnore
 
 	debounceTime time.Duration
 	debounceMap  map[string]*time.Timer
@@ -114,10 +116,9 @@ func (w *WorkspaceWatcher) AddRegistrations(ctx context.Context, id string, watc
 
 			// Skip directories that should be excluded
 			if d.IsDir() {
-				log.Println(path)
-				if path != w.workspacePath && shouldExcludeDir(path) {
+				if path != w.workspacePath && w.shouldExcludeDir(path) {
 					if debug {
-						log.Printf("Skipping excluded directory!!: %s", path)
+						log.Printf("Skipping excluded directory!: %s", path)
 					}
 					return filepath.SkipDir
 				}
@@ -150,6 +151,24 @@ func (w *WorkspaceWatcher) AddRegistrations(ctx context.Context, id string, watc
 func (w *WorkspaceWatcher) WatchWorkspace(ctx context.Context, workspacePath string) {
 	w.workspacePath = workspacePath
 
+	// Load .gitignore
+	gitignorePath := filepath.Join(workspacePath, ".gitignore")
+	if _, err := os.Stat(gitignorePath); err == nil {
+		var compileErr error
+		w.gitIgnore, compileErr = gitignore.CompileIgnoreFile(gitignorePath)
+		if compileErr != nil {
+			log.Printf("Error compiling .gitignore file %s: %v", gitignorePath, compileErr)
+			// Continue without gitignore rules if compilation fails
+			w.gitIgnore = nil
+		} else if debug {
+			log.Printf("Successfully loaded .gitignore from %s", gitignorePath)
+		}
+	} else if !os.IsNotExist(err) {
+		log.Printf("Error checking for .gitignore file %s: %v", gitignorePath, err)
+	} else if debug {
+		log.Printf(".gitignore not found at %s", gitignorePath)
+	}
+
 	// Register handler for file watcher registrations from the server
 	lsp.RegisterFileWatchHandler(func(id string, watchers []protocol.FileSystemWatcher) {
 		w.AddRegistrations(ctx, id, watchers)
@@ -169,7 +188,7 @@ func (w *WorkspaceWatcher) WatchWorkspace(ctx context.Context, workspacePath str
 
 		// Skip excluded directories (except workspace root)
 		if d.IsDir() && path != workspacePath {
-			if shouldExcludeDir(path) {
+			if w.shouldExcludeDir(path) {
 				if debug {
 					log.Printf("Skipping watching excluded directory: %s", path)
 				}
@@ -209,14 +228,14 @@ func (w *WorkspaceWatcher) WatchWorkspace(ctx context.Context, workspacePath str
 				if info, err := os.Stat(event.Name); err == nil {
 					if info.IsDir() {
 						// Skip excluded directories
-						if !shouldExcludeDir(event.Name) {
+						if !w.shouldExcludeDir(event.Name) {
 							if err := watcher.Add(event.Name); err != nil {
 								log.Printf("Error watching new directory: %v", err)
 							}
 						}
 					} else {
 						// For newly created files
-						if !shouldExcludeFile(event.Name) {
+						if !w.shouldExcludeFile(event.Name) {
 							w.openMatchingFile(ctx, event.Name)
 						}
 					}
@@ -241,22 +260,22 @@ func (w *WorkspaceWatcher) WatchWorkspace(ctx context.Context, workspacePath str
 					// Already handled earlier in the event loop
 					// Just send the notification if needed
 					info, _ := os.Stat(event.Name)
-					if !info.IsDir() && watchKind&protocol.WatchCreate != 0 {
+					if info != nil && !info.IsDir() && watchKind&protocol.WatchCreate != 0 && !w.shouldExcludeFile(event.Name) {
 						w.debounceHandleFileEvent(ctx, uri, protocol.FileChangeType(protocol.Created))
 					}
 				case event.Op&fsnotify.Remove != 0:
-					if watchKind&protocol.WatchDelete != 0 {
+					if watchKind&protocol.WatchDelete != 0 && !w.shouldExcludeFile(event.Name) {
 						w.handleFileEvent(ctx, uri, protocol.FileChangeType(protocol.Deleted))
 					}
 				case event.Op&fsnotify.Rename != 0:
-					// For renames, first delete
-					if watchKind&protocol.WatchDelete != 0 {
+					// For renames, first delete if not excluded
+					if watchKind&protocol.WatchDelete != 0 && !w.shouldExcludeFile(event.Name) {
 						w.handleFileEvent(ctx, uri, protocol.FileChangeType(protocol.Deleted))
 					}
 
-					// Then check if the new file exists and create an event
+					// Then check if the new file exists and create an event if not excluded
 					if info, err := os.Stat(event.Name); err == nil && !info.IsDir() {
-						if watchKind&protocol.WatchCreate != 0 {
+						if watchKind&protocol.WatchCreate != 0 && !w.shouldExcludeFile(event.Name) {
 							w.debounceHandleFileEvent(ctx, uri, protocol.FileChangeType(protocol.Created))
 						}
 					}
@@ -557,11 +576,17 @@ var (
 )
 
 // shouldExcludeDir returns true if the directory should be excluded from watching/opening
-func shouldExcludeDir(dirPath string) bool {
+func (w *WorkspaceWatcher) shouldExcludeDir(dirPath string) bool {
+	// Check gitignore first
+	relPath, err := filepath.Rel(w.workspacePath, dirPath)
+	if err == nil && w.gitIgnore != nil && w.gitIgnore.MatchesPath(filepath.ToSlash(relPath)) {
+		return true
+	}
+
 	dirName := filepath.Base(dirPath)
 
-	// Skip dot directories
-	if strings.HasPrefix(dirName, ".") {
+	// Skip dot directories (common convention, often covered by gitignore but good fallback)
+	if strings.HasPrefix(dirName, ".") && dirName != "." && dirName != ".." {
 		return true
 	}
 
@@ -574,11 +599,17 @@ func shouldExcludeDir(dirPath string) bool {
 }
 
 // shouldExcludeFile returns true if the file should be excluded from opening
-func shouldExcludeFile(filePath string) bool {
+func (w *WorkspaceWatcher) shouldExcludeFile(filePath string) bool {
+	// Check gitignore first
+	relPath, err := filepath.Rel(w.workspacePath, filePath)
+	if err == nil && w.gitIgnore != nil && w.gitIgnore.MatchesPath(filepath.ToSlash(relPath)) {
+		return true
+	}
+
 	fileName := filepath.Base(filePath)
 
-	// Skip dot files
-	if strings.HasPrefix(fileName, ".") {
+	// Skip dot files (common convention, often covered by gitignore but good fallback)
+	if strings.HasPrefix(fileName, ".") && fileName != "." && fileName != ".." {
 		return true
 	}
 
@@ -620,7 +651,7 @@ func (w *WorkspaceWatcher) openMatchingFile(ctx context.Context, path string) {
 	}
 
 	// Skip excluded files
-	if shouldExcludeFile(path) {
+	if w.shouldExcludeFile(path) {
 		return
 	}
 
